@@ -1,13 +1,12 @@
 import json
 
-import openai
-
 
 class Model:
     name = None
     edit_format = None
     max_context_tokens = 0
     tokenizer = None
+    max_chat_history_tokens = 1024
 
     always_available = False
     use_repo_map = False
@@ -17,12 +16,12 @@ class Model:
     completion_price = None
 
     @classmethod
-    def create(cls, name):
+    def create(cls, name, client=None):
         from .openai import OpenAIModel
         from .openrouter import OpenRouterModel
 
-        if "openrouter.ai" in openai.api_base:
-            return OpenRouterModel(name)
+        if client and client.base_url.host == "openrouter.ai":
+            return OpenRouterModel(client, name)
         return OpenAIModel(name)
 
     def __str__(self):
@@ -34,11 +33,11 @@ class Model:
 
     @staticmethod
     def weak_model():
-        return Model.create("gpt-3.5-turbo")
+        return Model.create("gpt-3.5-turbo-1106")
 
     @staticmethod
     def commit_message_models():
-        return [Model.create("gpt-3.5-turbo"), Model.create("gpt-3.5-turbo-16k")]
+        return [Model.weak_model()]
 
     def token_count(self, messages):
         if not self.tokenizer:
