@@ -106,6 +106,7 @@ class Coder:
         use_git=True,
         voice_language=None,
         aider_ignore_file=None,
+        immediate_exit_after_interrupt=False,
     ):
         self.client = client
 
@@ -137,6 +138,8 @@ class Coder:
 
         self.dry_run = dry_run
         self.pretty = pretty
+        self.immediate_exit_after_interrupt = immediate_exit_after_interrupt
+        self.add_line_numbers_to_content = False
 
         if pretty:
             self.console = Console()
@@ -296,7 +299,13 @@ class Coder:
             prompt += "\n"
             prompt += relative_fname
             prompt += f"\n{self.fence[0]}\n"
-            prompt += content
+            if self.add_line_numbers_to_content:
+                line_number = 1
+                for content_line in content.splitlines():
+                    prompt += f"{line_number}|\t{content_line}\n"
+                    line_number += 1
+            else:
+                prompt += content
             prompt += f"{self.fence[1]}\n"
 
         return prompt
@@ -354,6 +363,10 @@ class Coder:
                 return
 
     def keyboard_interrupt(self):
+        if self.immediate_exit_after_interrupt:
+            self.io.tool_error("\n\n^C KeyboardInterrupt")
+            sys.exit()
+
         now = time.time()
 
         thresh = 2  # seconds

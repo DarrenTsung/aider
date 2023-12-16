@@ -9,6 +9,7 @@ import openai
 
 from aider import __version__, models
 from aider.coders import Coder
+from aider.agents import AgentConfig
 from aider.io import InputOutput
 from aider.repo import GitRepo
 from aider.versioncheck import check_version
@@ -383,6 +384,16 @@ def main(argv=None, input=None, output=None, force_git_root=None):
         help="Specify a file containing the message to send GPT, process reply, then exit (disables chat mode)",
     )
     other_group.add_argument(
+        "--agent",
+        metavar="AGENT",
+        help="Specify an agent from the built-ins or custom configurations via the --agent-config-file arg",
+    )
+    other_group.add_argument(
+        "--agent-config-file",
+        metavar="AGENT_CONFIG_FILE",
+        help="Provide agent configurations via a YAML file in addition to the .aider_agent_config.yml if it's present, used by the --agent arg",
+    )
+    other_group.add_argument(
         "--encoding",
         default="utf-8",
         help="Specify the encoding for input and output (default: utf-8)",
@@ -411,6 +422,11 @@ def main(argv=None, input=None, output=None, force_git_root=None):
         args.tool_error_color = "red"
         args.assistant_output_color = "blue"
         args.code_theme = "default"
+
+    is_running_agent = bool(args.agent)
+    if is_running_agent:
+        args.yes = True
+        args.auto_commits = False
 
     io = InputOutput(
         args.pretty,
@@ -538,6 +554,7 @@ def main(argv=None, input=None, output=None, force_git_root=None):
             use_git=args.git,
             voice_language=args.voice_language,
             aider_ignore_file=args.aiderignore,
+            immediate_exit_after_interrupt=is_running_agent,
         )
     except ValueError as err:
         io.tool_error(str(err))
@@ -572,7 +589,44 @@ def main(argv=None, input=None, output=None, force_git_root=None):
         io.tool_error(f"Cur working dir: {Path.cwd()}")
         io.tool_error(f"Git working dir: {git_root}")
 
-    if args.message:
+    if args.agent:
+        # Add boundary from initial tool_output with agent config output.
+        io.tool_output("-" * 50)
+        default_agent_config_file = ".aider_agent_config.yml"
+        default_agent_config = None
+        custom_agent_config = None
+        agent_config_contents = []
+
+        # Read the default agent-config-file if it exists
+        if Path(default_agent_config_file).is_file():
+            io.tool_output(f"Reading default agent configuration at file: {default_agent_config_file}..")
+            try:
+                agent_config_contents.append(io.read_text(default_agent_config_file))
+            except IOError as e:
+                io.tool_error(f"Error reading default agent config file: {e}")
+                return 1
+
+        # Read the custom agent-config-file if specified
+        if args.agent_config_file:
+            io.tool_output(f"Reading custom agent configuration at file: {args.agent_config_file}..")
+            try:
+                agent_config_contents.append(io.read_text(args.agent_config_file))
+            except FileNotFoundError:
+                io.tool_error(f"Custom agent config file not found: {args.agent_config_file}")
+                return 1
+            except IOError as e:
+                io.tool_error(f"Error reading custom agent config file: {e}")
+                return 1
+
+        agent_config = AgentConfig(agent_config_contents)
+        if agent_config.is_agent(args.agent):
+            # Add boundary for agent run output.
+            io.tool_output("-" * 50)
+            agent_config.run_agent(args.agent, coder)
+        else:
+            io.tool_error(f"Failed to find agent matching '{args.agent}', exiting.")
+            return 1
+    elif args.message:
         io.add_to_input_history(args.message)
         io.tool_output()
         coder.run(with_message=args.message)

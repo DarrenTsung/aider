@@ -25,6 +25,25 @@ And got this output:
 {output}
 """
 
+fix_agent_initial_run_output = """I am trying to fix the errors I'm getting from this command:
+`{command}`
+
+I will run this command repeatedly and provide the output each time, so break down the problem into
+small chunks if possible and work incrementally instead of trying to fix all the errors at once. This
+process works better if you are reading the smallest set of files possible, so only add the files
+you need to work on the current chunk of work!
+
+{context}
+
+I ran this command:
+
+{command}
+
+And got this output:
+
+{output}
+"""
+
 # CHAT HISTORY
 summarize = """*Briefly* summarize this partial conversation about programming.
 Include less detail about older parts and more detail about the most recent messages.
