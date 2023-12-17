@@ -69,7 +69,7 @@ class FixAgent(Agent):
 
                 command_output = "\n".join(result.stdout.split("\n")[:self.max_output_lines])
 
-                # Clear the set of files added to the context every iteration of fixing.
+                # Remove files not mentioned in the output from the context every iteration of fixing.
                 # This improves fix accuracy because the context gets cluttered quickly for common
                 # tasks like fixing lint errors which are scattered across multiple files.
                 #
@@ -77,8 +77,13 @@ class FixAgent(Agent):
                 # done with them, but it didn't request for any dropped files.
                 dropped_files = None
                 if len(coder.abs_fnames) > 0:
-                    dropped_files = coder.get_inchat_relative_files()
-                    coder.abs_fnames = set()
+                    mentioned_files = set()
+                    for fname in coder.abs_fnames:
+                        rel_fname = coder.get_rel_fname(fname)
+                        if rel_fname in command_output:
+                            mentioned_files.add(fname)
+                    dropped_files = [coder.get_rel_fname(fname) for fname in set(coder.abs_fnames) - mentioned_files]
+                    coder.abs_fnames = mentioned_files
 
                 if first_run:
                     new_user_message = prompts.fix_agent_initial_run_output.format(
