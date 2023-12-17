@@ -2,6 +2,7 @@ import subprocess
 from .base_agent import Agent, AgentConfigError
 from aider import prompts
 
+
 class FixAgent(Agent):
     @classmethod
     def type(self):
@@ -19,27 +20,16 @@ class FixAgent(Agent):
 
     def __init__(self, agent_name, config):
         self.agent_name = agent_name
-        if not isinstance(config["command"], str):
-            raise AgentConfigError(
-                f"FixAgent '{agent_name}' has an invalid 'command' value. It must be a string."
-            )
-        self.command = config["command"]
+        self.command = self.read_required_config_value(
+            config, key="command", expected_type=str
+        )
 
-        self.context = None
-        if "context" in config:
-            if not isinstance(config["context"], str):
-                raise AgentConfigError(
-                    f"FixAgent '{agent_name}' has an invalid 'context' value. It must be a string."
-                )
-            self.context = config["context"]
-
-        self.max_output_lines = 50
-        if "max_output_lines" in config:
-            if not isinstance(config["max_output_lines"], int):
-                raise AgentConfigError(
-                    f"FixAgent '{agent_name}' has an invalid 'max_output_lines' value. It must be an int."
-                )
-            self.max_output_lines = int(config["max_output_lines"])
+        self.context = self.read_config_value(
+            config, key="context", expected_type=str, default=None
+        )
+        self.max_output_lines = self.read_config_value(
+            config, key="max_output_lines", expected_type=int, default=50
+        )
 
     def run(self, coder):
         coder.add_line_numbers_to_content = True
@@ -67,7 +57,9 @@ class FixAgent(Agent):
                     )
                     break
 
-                command_output = "\n".join(result.stdout.split("\n")[:self.max_output_lines])
+                command_output = "\n".join(
+                    result.stdout.split("\n")[: self.max_output_lines]
+                )
 
                 # Remove files not mentioned in the output from the context every iteration of fixing.
                 # This improves fix accuracy because the context gets cluttered quickly for common
@@ -82,7 +74,10 @@ class FixAgent(Agent):
                         rel_fname = coder.get_rel_fname(fname)
                         if rel_fname in command_output:
                             mentioned_files.add(fname)
-                    dropped_files = [coder.get_rel_fname(fname) for fname in set(coder.abs_fnames) - mentioned_files]
+                    dropped_files = [
+                        coder.get_rel_fname(fname)
+                        for fname in set(coder.abs_fnames) - mentioned_files
+                    ]
                     coder.abs_fnames = mentioned_files
 
                 if first_run:
