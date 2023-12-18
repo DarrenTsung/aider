@@ -3,12 +3,14 @@
 import hashlib
 import json
 import os
+import re
 import sys
 import threading
 import time
 import traceback
 from json.decoder import JSONDecodeError
 from pathlib import Path
+from collections import defaultdict
 
 import openai
 from jsonschema import Draft7Validator
@@ -26,7 +28,6 @@ from aider.sendchat import send_with_retries
 
 from ..dump import dump  # noqa: F401
 
-
 class MissingAPIKeyError(ValueError):
     pass
 
@@ -42,6 +43,17 @@ def wrap_fence(name):
 class Coder:
     client = None
     abs_fnames = None
+    # Dictionary of abs_fnames to ranges to send as part of the context.
+    #
+    # For example: {"/user/aider/main.py": [(2, 10), (15, 20)]} would
+    # mean that we should send lines 2-10 (inclusive) and 15-20 of aider/main.py.
+    #
+    # Note that the ranges should be sorted and merged.
+    #
+    # This feature is disabled if add_line_numbers_to_content is False, since
+    # sending partial files is confusing without line numbers.
+    abs_fnames_to_ranges = {}
+    additional_lines_around_mentioned_line_number = 10
     repo = None
     last_aider_commit_hash = None
     last_asked_for_commit_time = 0
@@ -297,13 +309,28 @@ class Coder:
         for fname, content in self.get_abs_fnames_content():
             relative_fname = self.get_rel_fname(fname)
             prompt += "\n"
-            prompt += relative_fname
+            if self.add_line_numbers_to_content and fname in self.abs_fnames_to_ranges:
+                prompt += f"{relative_fname}:{','.join([f'{start}-{end}' for start, end in self.abs_fnames_to_ranges[fname]])}"
+            else:
+                prompt += relative_fname
             prompt += f"\n{self.fence[0]}\n"
             if self.add_line_numbers_to_content:
-                line_number = 1
-                for content_line in content.splitlines():
-                    prompt += f"{line_number}|\t{content_line}\n"
-                    line_number += 1
+                content_by_lines = content.splitlines()
+                if fname in self.abs_fnames_to_ranges:
+                    output_for_ranges = []
+                    for (start, end) in self.abs_fnames_to_ranges[fname]:
+                        output_for_range = ""
+                        line_number = start
+                        for content_line in content_by_lines[start:end + 1]:
+                            output_for_range += f"{line_number}|\t{content_line}\n"
+                            line_number += 1
+                        output_for_ranges.append(output_for_range)
+                    prompt += "...\n".join(output_for_ranges)
+                else:
+                    line_number = 1
+                    for content_line in content_by_lines:
+                        prompt += f"{line_number}|\t{content_line}\n"
+                        line_number += 1
             else:
                 prompt += content
             prompt += f"{self.fence[1]}\n"
@@ -560,46 +587,103 @@ class Coder:
                 )
             ]
 
-    def check_for_file_mentions(self, content):
-        words = set(word for word in content.split())
+    def check_for_file_mentions(self, content, find_mentions_for_partial_files_in_chat=False):
+        def strip_word(word):
+            # drop sentence punctuation from the end
+            word = word.rstrip(",.!;")
+            # strip away all kinds of quotes
+            quotes = "".join(['"', "'", "`"])
+            word = word.strip(quotes)
+            # strip away line / column numbers from the ends
+            word = re.sub(f'[:\d]+$', '', word)
+            return word 
 
-        # drop sentence punctuation from the end
-        words = set(word.rstrip(",.!;") for word in words)
+        words_to_original_word = defaultdict(list)
+        for word in content.split():
+            stripped_word = strip_word(word)
+            words_to_original_word[stripped_word].append(word)
 
-        # strip away all kinds of quotes
-        quotes = "".join(['"', "'", "`"])
-        words = set(word.strip(quotes) for word in words)
+        addable_rel_fnames = self.get_addable_relative_files(find_mentions_for_partial_files_in_chat=find_mentions_for_partial_files_in_chat)
 
-        addable_rel_fnames = self.get_addable_relative_files()
-
+        mentioned_rel_fnames_with_line_numbers = defaultdict(list)
         mentioned_rel_fnames = set()
-        fname_to_rel_fnames = {}
+        fname_to_rel_fnames = defaultdict(list)
         for rel_fname in addable_rel_fnames:
-            if rel_fname in words:
-                mentioned_rel_fnames.add(str(rel_fname))
-
-            fname = os.path.basename(rel_fname)
-            if fname not in fname_to_rel_fnames:
-                fname_to_rel_fnames[fname] = []
-            fname_to_rel_fnames[fname].append(rel_fname)
+            if rel_fname in words_to_original_word:
+                # Check to see if the original mention included a line number.
+                for original_word in words_to_original_word[rel_fname]:
+                    match = re.search(r":(\d+)", original_word.split(rel_fname)[1])
+                    if match:
+                        line_number = int(match.group(1))
+                        mentioned_rel_fnames_with_line_numbers[str(rel_fname)].append(line_number)
+                    else:
+                        mentioned_rel_fnames.add(str(rel_fname))
+            else:
+                fname = os.path.basename(rel_fname)
+                fname_to_rel_fnames[fname].append(rel_fname)
 
         for fname, rel_fnames in fname_to_rel_fnames.items():
-            if len(rel_fnames) == 1 and fname in words:
+            if len(rel_fnames) == 1 and fname in words_to_original_word:
                 mentioned_rel_fnames.add(rel_fnames[0])
 
-        if not mentioned_rel_fnames:
+        if not mentioned_rel_fnames and not mentioned_rel_fnames_with_line_numbers:
             return
+
+        # If we're going to add the whole file to the context, ignore the mentioned
+        # line numbers
+        for rel_fname in mentioned_rel_fnames:
+            mentioned_rel_fnames_with_line_numbers.pop(rel_fname, None)
+
+        mentioned_rel_fnames_to_ranges = {}
+        for rel_fname, line_numbers in mentioned_rel_fnames_with_line_numbers.items():
+            ranges = self.abs_fnames_to_ranges.get(self.abs_root_path(rel_fname), [])
+            for line_number in line_numbers:
+                ranges.append((
+                    line_number - self.additional_lines_around_mentioned_line_number,
+                    line_number + self.additional_lines_around_mentioned_line_number,
+                ))
+
+            # Sort the ranges by their start value
+            ranges.sort(key=lambda x: x[0])
+
+            # Merge the ranges
+            merged_ranges = []
+            for current_range in ranges:
+                if not merged_ranges:
+                    merged_ranges.append(current_range)
+                else:
+                    last_range = merged_ranges[-1]
+                    # Check if the current range overlaps with the last range in merged_ranges
+                    if current_range[0] <= last_range[1]:
+                        # Merge the two ranges
+                        merged_ranges[-1] = (last_range[0], max(last_range[1], current_range[1]))
+                    else:
+                        # No overlap, add the current range to the list
+                        merged_ranges.append(current_range)
+
+            mentioned_rel_fnames_to_ranges[rel_fname] = merged_ranges
 
         for rel_fname in mentioned_rel_fnames:
             self.io.tool_output(rel_fname)
+        for rel_fname, ranges in mentioned_rel_fnames_to_ranges.items():
+            self.io.tool_output(f"{rel_fname}:{','.join([f'{start}-{end}' for start, end in ranges])}")
 
         if not self.io.confirm_ask("Add these files to the chat?"):
             return
 
+        added_rel_fnames = []
         for rel_fname in mentioned_rel_fnames:
+            added_rel_fnames.append(rel_fname)
             self.add_rel_fname(rel_fname)
+            # If we're adding the full file, get rid of any ranges
+            self.abs_fnames_to_ranges.pop(self.abs_root_path(rel_fname), None)
 
-        return prompts.added_files.format(fnames=", ".join(mentioned_rel_fnames))
+        for rel_fname, ranges in mentioned_rel_fnames_to_ranges.items():
+            added_rel_fnames.append(rel_fname)
+            self.add_rel_fname(rel_fname)
+            self.abs_fnames_to_ranges[self.abs_root_path(rel_fname)] = ranges
+
+        return prompts.added_files.format(fnames=", ".join(added_rel_fnames))
 
     def send(self, messages, model=None, functions=None):
         if not model:
@@ -771,8 +855,12 @@ class Coder:
             return 0
         return max(path.stat().st_mtime for path in files)
 
-    def get_addable_relative_files(self):
-        return set(self.get_all_relative_files()) - set(self.get_inchat_relative_files())
+    def get_addable_relative_files(self, find_mentions_for_partial_files_in_chat=False):
+        partial_inchat_files = [self.get_rel_fname(fname) for fname in self.abs_fnames_to_ranges.keys()]
+        files_in_chat = set(self.get_inchat_relative_files())
+        if find_mentions_for_partial_files_in_chat:
+            files_in_chat -= set(partial_inchat_files)
+        return set(self.get_all_relative_files()) - files_in_chat
 
     def check_for_dirty_commit(self, path):
         if not self.repo:
