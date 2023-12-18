@@ -26,6 +26,8 @@ from aider.repo import GitRepo
 from aider.repomap import RepoMap
 from aider.sendchat import send_with_retries
 
+from .in_chat_files import InChatFiles
+
 from ..dump import dump  # noqa: F401
 
 class MissingAPIKeyError(ValueError):
@@ -42,18 +44,7 @@ def wrap_fence(name):
 
 class Coder:
     client = None
-    abs_fnames = None
-    # Dictionary of abs_fnames to ranges to send as part of the context.
-    #
-    # For example: {"/user/aider/main.py": [(2, 10), (15, 20)]} would
-    # mean that we should send lines 2-10 (inclusive) and 15-20 of aider/main.py.
-    #
-    # Note that the ranges should be sorted and merged.
-    #
-    # This feature is disabled if add_line_numbers_to_content is False, since
-    # sending partial files is confusing without line numbers.
-    abs_fnames_to_ranges = {}
-    additional_lines_around_mentioned_line_number = 10
+    in_chat_files = InChatFiles()
     repo = None
     last_aider_commit_hash = None
     last_asked_for_commit_time = 0
@@ -133,7 +124,6 @@ class Coder:
         self.need_commit_before_edits = set()
 
         self.verbose = verbose
-        self.abs_fnames = set()
         self.cur_messages = []
         self.done_messages = []
 
@@ -176,14 +166,14 @@ class Coder:
             if not fname.is_file():
                 raise ValueError(f"{fname} is not a file")
 
-            self.abs_fnames.add(str(fname.resolve()))
+            self.in_chat_files.add_file(str(fname.resolve()))
 
         if use_git:
             try:
                 self.repo = GitRepo(
                     self.io, fnames, git_dname, aider_ignore_file, client=self.client
                 )
-                self.root = self.repo.root
+                self.in_chat_files.set_root_from_repo(self.repo)
             except FileNotFoundError:
                 self.repo = None
 
@@ -192,12 +182,12 @@ class Coder:
             self.io.tool_output(f"Git repo: {rel_repo_dir}")
         else:
             self.io.tool_output("Git repo: none")
-            self.find_common_root()
+            self.in_chat_files.update_root_from_files()
 
         if main_model.use_repo_map and self.repo and self.gpt_prompts.repo_content_prefix:
             self.repo_map = RepoMap(
                 map_tokens,
-                self.root,
+                self.in_chat_files.get_root(),
                 self.main_model,
                 io,
                 self.gpt_prompts.repo_content_prefix,
@@ -230,22 +220,8 @@ class Coder:
                 self.io.tool_output("JSON Schema:")
                 self.io.tool_output(json.dumps(self.functions, indent=4))
 
-    def find_common_root(self):
-        if len(self.abs_fnames) == 1:
-            self.root = os.path.dirname(list(self.abs_fnames)[0])
-        elif self.abs_fnames:
-            self.root = os.path.commonpath(list(self.abs_fnames))
-        else:
-            self.root = os.getcwd()
-
-        self.root = utils.safe_abs_path(self.root)
-
-    def add_rel_fname(self, rel_fname):
-        self.abs_fnames.add(self.abs_root_path(rel_fname))
-
     def abs_root_path(self, path):
-        res = Path(self.root) / path
-        return utils.safe_abs_path(res)
+        return self.in_chat_files.convert_relative_to_absolute(path)
 
     fences = [
         ("``" + "`", "``" + "`"),
@@ -267,20 +243,9 @@ class Coder:
 
         return True
 
-    def get_abs_fnames_content(self):
-        for fname in list(self.abs_fnames):
-            content = self.io.read_text(fname)
-
-            if content is None:
-                relative_fname = self.get_rel_fname(fname)
-                self.io.tool_error(f"Dropping {relative_fname} from the chat.")
-                self.abs_fnames.remove(fname)
-            else:
-                yield fname, content
-
     def choose_fence(self):
         all_content = ""
-        for _fname, content in self.get_abs_fnames_content():
+        for _fname, content in self.in_chat_files.yield_files_and_content(self.io):
             all_content += content + "\n"
 
         good = False
@@ -341,7 +306,7 @@ class Coder:
         if not self.repo_map:
             return
 
-        other_files = set(self.get_all_abs_files()) - set(self.abs_fnames)
+        other_files = set(self.get_all_absolute_files()) - set(self.abs_fnames)
         repo_content = self.repo_map.get_repo_map(self.abs_fnames, other_files)
         return repo_content
 
@@ -354,9 +319,9 @@ class Coder:
                 all_content += "\n"
             all_content += repo_content
 
-        if self.abs_fnames:
+        if self.in_chat_files.has_files():
             files_content = self.gpt_prompts.files_content_prefix
-            files_content += self.get_files_content()
+            files_content += self.in_chat_files.get_files_content(self.fence, add_line_numbers_to_content=self.add_line_numbers_to_content)
         else:
             files_content = self.gpt_prompts.files_no_full_files
 
@@ -449,7 +414,7 @@ class Coder:
 
     def run_loop(self):
         inp = self.io.get_input(
-            self.root,
+            self.in_chat_files.get_root(),
             self.get_inchat_relative_files(),
             self.get_addable_relative_files(),
             self.commands,
@@ -639,7 +604,7 @@ class Coder:
             ranges = self.abs_fnames_to_ranges.get(self.abs_root_path(rel_fname), [])
             for line_number in line_numbers:
                 ranges.append((
-                    line_number - self.additional_lines_around_mentioned_line_number,
+                    line_number - self.add_relative_file,
                     line_number + self.additional_lines_around_mentioned_line_number,
                 ))
 
@@ -674,13 +639,13 @@ class Coder:
         added_rel_fnames = []
         for rel_fname in mentioned_rel_fnames:
             added_rel_fnames.append(rel_fname)
-            self.add_rel_fname(rel_fname)
+            self.in_chat_files.add_relative_file(rel_fname)
             # If we're adding the full file, get rid of any ranges
             self.abs_fnames_to_ranges.pop(self.abs_root_path(rel_fname), None)
 
         for rel_fname, ranges in mentioned_rel_fnames_to_ranges.items():
             added_rel_fnames.append(rel_fname)
-            self.add_rel_fname(rel_fname)
+            self.in_chat_files.add_relative_file(rel_fname)
             self.abs_fnames_to_ranges[self.abs_root_path(rel_fname)] = ranges
 
         return prompts.added_files.format(fnames=", ".join(added_rel_fnames))
@@ -828,12 +793,8 @@ class Coder:
     def render_incremental_response(self, final):
         return self.partial_response_content
 
-    def get_rel_fname(self, fname):
-        return os.path.relpath(fname, self.root)
-
     def get_inchat_relative_files(self):
-        files = [self.get_rel_fname(fname) for fname in self.abs_fnames]
-        return sorted(set(files))
+        return sorted(self.in_chat_files.relative_files())
 
     def get_all_relative_files(self):
         if self.repo:
@@ -844,13 +805,13 @@ class Coder:
         files = [fname for fname in files if Path(self.abs_root_path(fname)).is_file()]
         return sorted(set(files))
 
-    def get_all_abs_files(self):
+    def get_all_absolute_files(self):
         files = self.get_all_relative_files()
         files = [self.abs_root_path(path) for path in files]
         return files
 
     def get_last_modified(self):
-        files = [Path(fn) for fn in self.get_all_abs_files() if Path(fn).exists()]
+        files = [Path(fn) for fn in self.get_all_absolute_files() if Path(fn).exists()]
         if not files:
             return 0
         return max(path.stat().st_mtime for path in files)
@@ -882,7 +843,7 @@ class Coder:
         else:
             need_to_add = False
 
-        if full_path in self.abs_fnames:
+        if full_path in self.in_chat_files.files():
             self.check_for_dirty_commit(path)
             return True
 
@@ -901,7 +862,7 @@ class Coder:
                 if need_to_add:
                     self.repo.repo.git.add(full_path)
 
-            self.abs_fnames.add(full_path)
+            self.in_chat_files.add_file(full_path)
             return True
 
         if not self.io.confirm_ask(
@@ -913,7 +874,7 @@ class Coder:
         if need_to_add:
             self.repo.repo.git.add(full_path)
 
-        self.abs_fnames.add(full_path)
+        self.in_chat_files.add_file(full_path)
         self.check_for_dirty_commit(path)
 
         return True

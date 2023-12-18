@@ -127,7 +127,7 @@ class Commands:
             res.append((tokens, "chat history", "use /clear to clear"))
 
         # repo map
-        other_files = set(self.coder.get_all_abs_files()) - set(self.coder.abs_fnames)
+        other_files = set(self.coder.get_all_absolute_files()) - set(self.coder.abs_fnames)
         if self.coder.repo_map:
             repo_content = self.coder.repo_map.get_repo_map(self.coder.abs_fnames, other_files)
             if repo_content:
