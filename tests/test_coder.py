@@ -172,6 +172,33 @@ class TestCoder(unittest.TestCase):
 
             self.assertEqual(coder.abs_fnames, expected_files)
 
+    def test_check_for_filename_with_line_number_mentions(self):
+        with GitTemporaryDirectory():
+            repo = git.Repo()
+
+            mock_io = MagicMock()
+            mock_io.read_text.return_value = "\n".join([f"testFileLine{num}" for num in range(0, 50)])
+
+            fname1 = Path("file1.txt")
+            fname1.touch()
+            repo.git.add(str(fname1))
+            repo.git.commit("-m", "new")
+
+            # Initialize the Coder object with the mocked IO and mocked repo
+            coder = Coder.create(models.GPT4, None, mock_io)
+            # Make explicit for test.
+            coder.add_line_numbers_to_content = True
+            coder.additional_lines_around_mentioned_line_number = 5
+
+            coder.check_for_file_mentions("Please check file1.txt:20.")
+            self.assertEqual(coder.abs_fnames, set([str(Path(coder.root) / fname1)]))
+            self.assertIn("file1.txt:15-25", coder.get_files_content().splitlines())
+
+            # Check handling merging ranges, multiple mentions, column numbers, and out-of-bounds.
+            coder.check_for_file_mentions("Also check file1.txt:25:2 and file1.txt:50")
+            self.assertEqual(coder.abs_fnames, set([str(Path(coder.root) / fname1)]))
+            self.assertIn("file1.txt:15-30,45-55", coder.get_files_content().splitlines())
+
     def test_check_for_ambiguous_filename_mentions_of_longer_paths(self):
         with GitTemporaryDirectory():
             io = InputOutput(pretty=False, yes=True)

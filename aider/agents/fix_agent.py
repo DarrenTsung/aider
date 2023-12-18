@@ -16,7 +16,7 @@ class FixAgent(Agent):
     def optional_config_keys(self):
         # IMPROVEMENT: allow FixAgent to call commands from a whitelisted list of commands
         # provided via `additional_allowed_commands`.
-        return {"context", "max_output_lines"}
+        return {"context", "max_output_lines", "add_files_mentioned_in_command_output"}
 
     def __init__(self, agent_name, config):
         self.agent_name = agent_name
@@ -29,6 +29,9 @@ class FixAgent(Agent):
         )
         self.max_output_lines = self.read_config_value(
             config, key="max_output_lines", expected_type=int, default=50
+        )
+        self.add_files_mentioned_in_command_output = self.read_config_value(
+            config, key="add_files_mentioned_in_command_output", expected_type=bool, default=True
         )
 
     def run(self, coder):
@@ -95,9 +98,17 @@ class FixAgent(Agent):
 
                 if dropped_files:
                     dropped_files_joined = ", ".join(dropped_files)
-                    new_user_message += f"\n\nI dropped these *read-write* files from the context: {dropped_files_joined}, please re-request *read-write* access for these files if you need them."
+                    new_user_message += f"\nI dropped these *read-write* files from the context: {dropped_files_joined}, please re-request *read-write* access for these files if you need them."
 
                 coder.io.tool_output(new_user_message)
+
+                if self.add_files_mentioned_in_command_output:
+                    coder.io.tool_output("\n")
+                    added_files_message = coder.check_for_file_mentions(command_output)
+                    if added_files_message:
+                        added_files_message = f"\n{added_files_message}"
+                        coder.io.tool_output(added_files_message)
+                        new_user_message += added_files_message
 
                 while new_user_message:
                     new_user_message = coder.send_new_user_message(new_user_message)
