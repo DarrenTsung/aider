@@ -1,7 +1,10 @@
 import subprocess
 from .base_agent import Agent, AgentConfigError
 from aider import prompts
-
+from enum import Enum
+class ChunkOutputStrategy(Enum):
+     NONE = "None"
+     EMPTY_LINE = "SeparatedByEmptyLines"
 
 class FixAgent(Agent):
     @classmethod
@@ -16,7 +19,7 @@ class FixAgent(Agent):
     def optional_config_keys(self):
         # IMPROVEMENT: allow FixAgent to call commands from a whitelisted list of commands
         # provided via `additional_allowed_commands`.
-        return {"context", "max_output_lines", "add_files_mentioned_in_command_output"}
+        return {"context", "max_output_lines", "add_files_mentioned_in_command_output", "chunk_output_strategy"}
 
     def __init__(self, agent_name, config):
         self.agent_name = agent_name
@@ -33,6 +36,16 @@ class FixAgent(Agent):
         self.add_files_mentioned_in_command_output = self.read_config_value(
             config, key="add_files_mentioned_in_command_output", expected_type=bool, default=True
         )
+        chunk_output_strategy_value = self.read_config_value(
+            config, key="chunk_output_strategy", expected_type=str, default=ChunkOutputStrategy.NONE.value
+        )
+        try:
+            self.chunk_output_strategy = ChunkOutputStrategy(chunk_output_strategy_value)
+        except ValueError:
+            valid_strategies = [strategy.value for strategy in ChunkOutputStrategy]
+            raise AgentConfigError(
+                f"FixAgent '{self.agent_name}' has an invalid 'chunk_output_strategy' value: '{chunk_output_strategy_value}'. It must be one of {', '.join(valid_strategies)}."
+            )
 
     def run(self, coder):
         coder.verbosely_list_files_in_context = True
@@ -61,9 +74,35 @@ class FixAgent(Agent):
                     )
                     break
 
-                command_output = "\n".join(
-                    result.stdout.split("\n")[: self.max_output_lines]
-                )
+                if self.chunk_output_strategy == ChunkOutputStrategy.EMPTY_LINE:
+                    output_lines = result.stdout.split("\n")
+                    chunks = []
+                    current_chunk = []
+                    # Split output into chunks
+                    for line in output_lines:
+                        if line.strip() == "":
+                            if current_chunk:  # Avoid appending empty chunks
+                                chunks.append(current_chunk)
+                                current_chunk = []
+                        else:
+                            current_chunk.append(line)
+                    if current_chunk:  # Add the last chunk if not empty
+                        chunks.append(current_chunk)
+                    
+                    # Include chunks while there is space left in self.max_output_lines
+                    command_output = ""
+                    line_count = 0
+                    for chunk in chunks:
+                        if line_count + len(chunk) <= self.max_output_lines:
+                            command_output += "\n".join(chunk) + "\n\n"
+                            line_count += len(chunk) + 1  # +1 for the empty line after the chunk
+                        else:
+                            break
+                    command_output = command_output.strip()  # Remove any trailing newlines
+                else:
+                    command_output = "\n".join(
+                        result.stdout.split("\n")[:self.max_output_lines]
+                    )
 
                 # Remove files not mentioned in the output from the context every iteration of fixing.
                 # This improves fix accuracy because the context gets cluttered quickly for common
