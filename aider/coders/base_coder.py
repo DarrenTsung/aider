@@ -62,6 +62,7 @@ class Coder:
     total_cost = 0.0
     num_exhausted_context_windows = 0
     last_keyboard_interrupt = None
+    verbosely_list_files_in_context = False
 
     @classmethod
     def create(
@@ -301,18 +302,21 @@ class Coder:
 
         return
 
-    def get_files_content(self, fnames=None):
-        if not fnames:
-            fnames = self.abs_fnames
+    def get_file_headers_in_context(self):
+        return [self.get_file_header(fname) for fname in self.abs_fnames]
 
+    def get_file_header(self, fname):
+        relative_fname = self.get_rel_fname(fname)
+        if self.add_line_numbers_to_content and fname in self.abs_fnames_to_ranges:
+            return f"{relative_fname}:{','.join([f'{start}-{end}' for start, end in self.abs_fnames_to_ranges[fname]])}"
+        else:
+            return relative_fname 
+
+    def get_files_content(self):
         prompt = ""
         for fname, content in self.get_abs_fnames_content():
-            relative_fname = self.get_rel_fname(fname)
             prompt += "\n"
-            if self.add_line_numbers_to_content and fname in self.abs_fnames_to_ranges:
-                prompt += f"{relative_fname}:{','.join([f'{start}-{end}' for start, end in self.abs_fnames_to_ranges[fname]])}"
-            else:
-                prompt += relative_fname
+            prompt += self.get_file_header(fname)
             prompt += f"\n{self.fence[0]}\n"
             if self.add_line_numbers_to_content:
                 content_by_lines = content.splitlines()
@@ -513,6 +517,10 @@ class Coder:
 
         if self.verbose:
             utils.show_messages(messages, functions=self.functions)
+
+        if self.verbosely_list_files_in_context:
+            file_headers_joined = "\n".join(self.get_file_headers_in_context())
+            self.io.tool_output(f"\nThe files in the context are:\n{file_headers_joined}\n")
 
         exhausted = False
         interrupted = False

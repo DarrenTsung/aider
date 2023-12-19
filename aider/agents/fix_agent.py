@@ -35,6 +35,7 @@ class FixAgent(Agent):
         )
 
     def run(self, coder):
+        coder.verbosely_list_files_in_context = True
         coder.add_line_numbers_to_content = True
 
         first_run = True
@@ -82,6 +83,7 @@ class FixAgent(Agent):
                         for fname in set(coder.abs_fnames) - mentioned_files
                     ]
                     coder.abs_fnames = mentioned_files
+                    coder.abs_fnames_to_ranges = {fname: ranges for fname, ranges in coder.abs_fnames_to_ranges.items() if fname in coder.abs_fnames}
 
                 if first_run:
                     new_user_message = prompts.fix_agent_initial_run_output.format(
@@ -100,14 +102,14 @@ class FixAgent(Agent):
                     dropped_files_joined = ", ".join(dropped_files)
                     new_user_message += f"\nI dropped these *read-write* files from the context: {dropped_files_joined}, please re-request *read-write* access for these files if you need them."
 
-                coder.io.tool_output(new_user_message)
+                coder.io.user_input(new_user_message, log_only=False)
 
                 if self.add_files_mentioned_in_command_output:
                     coder.io.tool_output("\n")
-                    added_files_message = coder.check_for_file_mentions(command_output)
+                    added_files_message = coder.check_for_file_mentions(command_output, find_mentions_for_partial_files_in_chat=True)
                     if added_files_message:
                         added_files_message = f"\n{added_files_message}"
-                        coder.io.tool_output(added_files_message)
+                        coder.io.user_input(added_files_message, log_only=False)
                         new_user_message += added_files_message
 
                 while new_user_message:
