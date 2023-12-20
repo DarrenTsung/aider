@@ -95,8 +95,7 @@ class Commands:
     def cmd_clear(self, args):
         "Clear the chat history"
 
-        self.coder.done_messages = []
-        self.coder.cur_messages = []
+        self.coder.clear_messages()
 
     def cmd_tokens(self, args):
         "Report on the number of tokens used by the current chat context"

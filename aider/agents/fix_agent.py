@@ -52,6 +52,7 @@ class FixAgent(Agent):
         coder.add_line_numbers_to_content = True
 
         first_run = True
+        accumulated_iterations_of_context = 0
         while True:
             try:
                 result = None
@@ -123,6 +124,16 @@ class FixAgent(Agent):
                     ]
                     coder.abs_fnames = mentioned_files
                     coder.abs_fnames_to_ranges = {fname: ranges for fname, ranges in coder.abs_fnames_to_ranges.items() if fname in coder.abs_fnames}
+
+                # If there were any dropped files or too many iterations have accumulated context,
+                # let's clear the chat history and start from first run again.
+                if dropped_files or accumulated_iterations_of_context >= 3:
+                    coder.io.tool_output("\nClearing past history of messages to reduce context and improve accuracy..\n")
+                    coder.clear_messages()
+                    first_run = True
+                    accumulated_iterations_of_context = 0
+
+                accumulated_iterations_of_context += 1
 
                 if first_run:
                     new_user_message = prompts.fix_agent_initial_run_output.format(

@@ -473,6 +473,10 @@ class Coder:
         prompt = prompt.format(fence=self.fence)
         return prompt
 
+    def clear_messages(self):
+        self.done_messages = []
+        self.cur_messages = []
+
     def format_messages(self):
         self.choose_fence()
         main_sys = self.fmt_system_prompt(self.gpt_prompts.main_system)
